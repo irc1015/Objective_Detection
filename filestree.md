@@ -169,7 +169,7 @@
 	- autobatch.py
 	- autodevice.py
 	- benchmarks.py
-	- checks.py		2025.6.13 not end 	
+	- checks.py		2025.6.14 not end 	
 	- dist.py
 	- downloads.py
 	- errors.py
