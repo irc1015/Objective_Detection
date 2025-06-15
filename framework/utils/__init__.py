@@ -201,4 +201,57 @@ class DataExportMixin:
         Notes:
             Requires `lxml` package to be installed.
         '''
+        from framework.utils.checks import check_requirements
 
+        check_requirements('lxml')
+        df = self.to_df(normalize=normalize, decimals=decimals)
+        return '<?xml version="1.0" encoding="utf-8"?>\n<root></root>' if df.empty else df.to_xml()
+
+    def to_html(self, normalize=False, decimals=5, index=False):
+        '''
+        Args:
+            normalize (bool, optional): Normalize numeric values.
+            decimals (int, optional): Decimal precision.
+            index (bool, optional): Whether to include index column in the HTML table.
+
+        Returns:
+            (str): HTML representation of the results.
+        '''
+        df = self.to_df(normalize=normalize, decimals=decimals)
+        return '<table></table>' if df.empty else df.to_html(index=index)
+
+    def tojson(self, normalize=False, decimals=5):
+        LOGGER
+
+
+
+
+
+
+def set_logging(name='LOGGING_NAME', verbose=True):
+    '''
+    Set up logging with UTF-8 encoding and configurable verbosity.
+
+    This function configures logging for the framework library, setting the appropriate logging level and
+    formatter based on the verbosity flag and the current process rank. It handles special cases for Windows
+    environments where UTF-8 encoding might not be the default.
+
+    Args:
+        name (str): Name of the logger.
+        verbose (bool): Flag to set logging level to INFO if True, ERROR otherwise.
+
+    Returns:
+        (logging.Logger): Configured logger object.
+
+    Examples:
+        >>> set_logging(name="framework", verbose=True)
+        >>> logger = logging.getLogger("framework")
+        >>> logger.info("This is an info message")
+
+    Notes:
+        - On Windows, this function attempts to reconfigure stdout to use UTF-8 encoding if possible.
+        - If reconfiguration is not possible, it falls back to a custom formatter that handles non-UTF-8 environments.
+        - The function sets up a StreamHandler with the appropriate formatter and level.
+        - The logger's propagate flag is set to False to prevent duplicate logging in parent loggers.
+    '''
+    level =

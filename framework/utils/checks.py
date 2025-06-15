@@ -18,7 +18,6 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from torch.optim.optimizer import required
 
 from framework.utils import ( ARM64,
                               ASSETS,
@@ -346,6 +345,195 @@ def check_python(mininum: str = '3.8.0', hard: bool = True, verbose: bool = Fals
         (bool): Whether the installed Python version meets the minimum constraints.
     '''
     return check_version(PYTHON_VERSION, mininum, name = 'Python', hard=hard, verbose=verbose)
+
+
+@TryExcept()
+def check_requirements(requirements = ROOT.parent / 'requirements.txt', exclude = (), install = True, cmds = ''):
+    '''
+    Check if installed dependencies meet models requirements and attempt to auto-update if needed.
+
+    Args:
+        requirements (Path | str | List[str]): Path to a requirements.txt file, a single package requirement as a
+            string, or a list of package requirements as strings.
+        exclude (tuple): Tuple of package names to exclude from checking.
+        install (bool): If True, attempt to auto-update packages that don't meet requirements.
+        cmds (str): Additional commands to pass to the pip install command when auto-updating.
+
+    Examples:
+        >>> from framework.utils.checks import check_requirements
+
+        Check a requirements.txt file
+        >>> check_requirements("path/to/requirements.txt")
+
+        Check a single package
+        >>> check_requirements("python>=3.8.0")
+
+        Check multiple packages
+        >>> check_requirements(["numpy", "python>=3.8.0"])
+    '''
+    prefix = colorstr('red', 'bold', 'requirements:')
+
+    if isinstance(requirements, Path):
+        file = requirements.resolve()
+        assert file.exists(), f"{prefix} {file} not found, check failed"
+        requirements = [f"{x.name}{x.specifier}" for x in parse_requirements(file) if x.name not in exclude]
+    elif isinstance(requirements, str):
+        requirements = [requirements]
+
+    pkgs = []
+    for r in requirements:
+        r_stripped = r.rpartition('/')[-1].replace('.git', '') # replace git+https://org/repo.git -> 'repo'
+        match = re.match(r"([a-zA-Z0-9-_]+)([<>!=~]+.*)?", r_stripped)
+        name, required = match[1], match[2].strip() if match[2] else ''
+        try:
+            assert check_version(metadata.version(name), required)
+        except (AssertionError, metadata.PackageNotFoundError):
+            pkgs.append(r)
+
+    @Retry(times = 2, delay = 1)
+    def attempt_install(packages, commands, use_uv):
+        if use_uv:
+            base = f"uv pip install --no-cache-dir {packages} {commands} --index-strategy=unsafe-best-match --break-system-packages --prerelease=allow"
+            try:
+                return subprocess.check_output(base, shell=True, stderr=subprocess.PIPE).decode()
+            except subprocess.CalledProcessError as e:
+                if e.stderr and 'No virtual environment found' in e.stderr.decode():
+                    return subprocess.check_output(
+                        base.replace('uv pip install', 'uv pip install --system'), shell=True
+                    ).decode()
+                raise
+        return subprocess.check_output(f"pip install --no-cache-dir {packages} {commands}", shell=True).decode()
+
+    s = ' '.join(f'"{x}"' for x in pkgs)
+    '''
+    pkgs = [1, 2, 3, 4, 5, 6, 7]
+    s = ' '.join(f'"{x}"' for x in pkgs)
+    --> "1" "2" "3" "4" "5" "6" "7"
+    '''
+    if s:
+        if install and AUTOINSTALL:
+            # Note uv fails on arm64 macOS and Raspberry Pi runners
+            n = len(pkgs)
+            LOGGER.info(f"{prefix} The framework requirement{'s' * (n > 1)} {pkgs} not found, attempting AutoUpdate")
+            # {'s' * (n > 1)}: Adds an 's' to "requirement" if n > 1 to handle pluralization.
+            try:
+                t = time.time()
+                assert ONLINE, 'AutoUpdate skipped (offline)'
+                LOGGER.info(attempt_install(s, cmds, use_uv=not ARM64 and check_uv()))
+                dt = time.time() - t
+                LOGGER.info(f"{prefix} AutoUpdate success {dt:.1f}s")
+                LOGGER.warning(
+                    f"{prefix} {colorstr('bold', 'Restart runtime or rerun command for updates to take effect')}\n"
+                )
+            except Exception as e:
+                LOGGER.warning(f"{prefix} ERROR: {e}")
+                return False
+        else:
+            return False
+
+    return True
+
+def check_torchvision():
+    '''
+    Check the installed versions of PyTorch and Torchvision to ensure they're compatible.
+
+    This function checks the installed versions of PyTorch and Torchvision, and warns if they're incompatible according
+    to the compatibility table based on: https://github.com/pytorch/vision#installation.
+    '''
+    compatibility_table = {
+        "2.7": ["0.22"],
+        "2.6": ["0.21"],
+        "2.5": ["0.20"],
+        "2.4": ["0.19"],
+        "2.3": ["0.18"],
+        "2.2": ["0.17"],
+        "2.1": ["0.16"],
+        "2.0": ["0.15"],
+        "1.13": ["0.14"],
+        "1.12": ["0.13"],
+    }
+
+    v_torch = '.'.join(torch.__version__.split('+', 1)[0].split('.')[:2])
+    '''
+    torch.__version__   -->  2.7.1+cu128
+    torch.__version__.split('+', 1)  -->  ['2.7.1', 'cu128']
+    torch.__version__.split('+', 1)[0].split('.')[:2] -->  ['2', '7']
+    '''
+
+    if v_torch in compatibility_table:
+        compatible_versions = compatibility_table[v_torch]
+        v_torchvision = '.'.join(TORCHVISION_VERSION.split('+', 1)[0].split('.')[:2])
+        if all(v_torchvision != v for v in compatible_versions):
+            LOGGER.warning(
+                f"torchvision=={v_torchvision} is incompatible with torch=={v_torch}.\n"
+                f"Run 'pip install torchvision=={compatible_versions[0]}' to fix torchvision or "
+                "'pip install -U torch torchvision' to update both.\n"
+                "For a full compatibility table see https://github.com/pytorch/vision#installation."
+            )
+
+
+def check_suffix(file='yolo11n.pt', suffix='.pt', msg=''):
+    '''
+    Check file(s) for acceptable suffix.
+
+    Args:
+        file (str | List[str]): File or list of files to check.
+        suffix (str | tuple): Acceptable suffix or tuple of suffixes.
+        msg (str): Additional message to display in case of error.
+    '''
+    if file and suffix:
+        if isinstance(suffix, str):
+            suffix = {suffix}
+        for f in file if isinstance(file, (list,tuple)) else [file]:
+            if s := str(f).rpartition('.')[-1].lower().strip():
+                assert f".{s}" in suffix, f"{msg}{f} acceptable suffix is {suffix}, not .{s}"
+
+
+def check_yolov5u_filename(file: str, verbose: bool = True):
+    '''
+    Replace legacy YOLOv5 filenames with updated YOLOv5u filenames.
+
+    Args:
+        file (str): Filename to check and potentially update.
+        verbose (bool): Whether to print information about the replacement.
+
+    Returns:
+        (str): Updated filename.
+    '''
+    if 'yolov3' in file or 'yolov5' in file:
+        if 'u.yaml' in file:
+            file = file.replace('u.yaml', '.yaml')
+        elif '.pt' in file and 'u' not in file:
+            original_file = file
+            file = re.sub(r"(.*yolov5([nsmlx]))\.pt", "\\1u.pt", file)  # i.e. yolov5n.pt -> yolov5nu.pt
+            file = re.sub(r"(.*yolov5([nsmlx])6)\.pt", "\\1u.pt", file)  # i.e. yolov5n6.pt -> yolov5n6u.pt
+            file = re.sub(r"(.*yolov3(|-tiny|-spp))\.pt", "\\1u.pt", file)  # i.e. yolov3-spp.pt -> yolov3-sppu.pt
+            if file != original_file and verbose:
+                LOGGER.info(
+                    f"PRO TIP  Replace 'model={original_file}' with new 'model={file}'.\nYOLOv5 'u' models are "
+                    f"trained with https://github.com/ultralytics/ultralytics and feature improved performance vs "
+                    f"standard YOLOv5 models trained with https://github.com/ultralytics/yolov5.\n"
+                )
+    return file
+
+
+def check_model_file_from_stem(model = 'yolo11n'):
+    '''
+     Return a model filename from a valid model stem.
+
+    Args:
+        model (str): Model stem to check.
+
+    Returns:
+        (str | Path): Model filename with appropriate suffix.
+    '''
+    path = Path(model)
+    if not path.suffix and path.stem in downloads.GITHUB_ASSETS_STEMS:
+        return path.with_suffix('.pt') # add suffix, i.e. yolo11n -> yolo11n.pt
+    return model
+
+
+
 
 
 
